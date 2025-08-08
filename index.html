@@ -1,0 +1,238 @@
+<script type="text/javascript">
+        var gk_isXlsx = false;
+        var gk_xlsxFileLookup = {};
+        var gk_fileData = {};
+        function filledCell(cell) {
+          return cell !== '' && cell != null;
+        }
+        function loadFileData(filename) {
+        if (gk_isXlsx && gk_xlsxFileLookup[filename]) {
+            try {
+                var workbook = XLSX.read(gk_fileData[filename], { type: 'base64' });
+                var firstSheetName = workbook.SheetNames[0];
+                var worksheet = workbook.Sheets[firstSheetName];
+
+                // Convert sheet to JSON to filter blank rows
+                var jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1, blankrows: false, defval: '' });
+                // Filter out blank rows (rows where all cells are empty, null, or undefined)
+                var filteredData = jsonData.filter(row => row.some(filledCell));
+
+                // Heuristic to find the header row by ignoring rows with fewer filled cells than the next row
+                var headerRowIndex = filteredData.findIndex((row, index) =>
+                  row.filter(filledCell).length >= filteredData[index + 1]?.filter(filledCell).length
+                );
+                // Fallback
+                if (headerRowIndex === -1 || headerRowIndex > 25) {
+                  headerRowIndex = 0;
+                }
+
+                // Convert filtered JSON back to CSV
+                var csv = XLSX.utils.aoa_to_sheet(filteredData.slice(headerRowIndex)); // Create a new sheet from filtered array of arrays
+                csv = XLSX.utils.sheet_to_csv(csv, { header: 1 });
+                return csv;
+            } catch (e) {
+                console.error(e);
+                return "";
+            }
+        }
+        return gk_fileData[filename] || "";
+        }
+        </script><!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI Video Generator</title>
+  <script src="https://cdn.jsdelivr.net/npm/react@18/umd/react.development.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    function App() {
+      const [storyPrompt, setStoryPrompt] = React.useState('');
+      const [generatedStory, setGeneratedStory] = React.useState('');
+      const [imagePrompts, setImagePrompts] = React.useState([]);
+      const [images, setImages] = React.useState([]);
+      const [audioUrl, setAudioUrl] = React.useState('');
+      const [videoUrl, setVideoUrl] = React.useState('');
+      const [isLoading, setIsLoading] = React.useState(false);
+      const [error, setError] = React.useState('');
+      const [uploadedImages, setUploadedImages] = React.useState([]);
+
+      const generateStoryPrompt = async () => {
+        setIsLoading(true);
+        setError('');
+        try {
+          const response = await fetch('http://localhost:8000/generate-story-prompt', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ custom_prompt: 'Generate a concise sci-fi story prompt for a video.' })
+          });
+          const data = await response.json();
+          setStoryPrompt(data.story_prompt);
+        } catch (err) {
+          setError('Failed to generate story prompt');
+        }
+        setIsLoading(false);
+      };
+
+      const generateVideo = async () => {
+        setIsLoading(true);
+        setError('');
+        try {
+          const formData = new FormData();
+          formData.append('story_prompt', storyPrompt);
+          formData.append('use_ai_prompt', false);
+          uploadedImages.forEach((image, index) => {
+            formData.append('images', image);
+          });
+
+          const response = await fetch('http://localhost:8000/generate-video', {
+            method: 'POST',
+            body: formData
+          });
+          const data = await response.json();
+          
+          // Poll for video completion
+          const checkVideo = async () => {
+            try {
+              const videoResponse = await fetch(`http://localhost:8000/get-video?filename=${encodeURIComponent(data.output_filename)}`);
+              if (videoResponse.ok) {
+                const blob = await videoResponse.blob();
+                setVideoUrl(URL.createObjectURL(blob));
+                setIsLoading(false);
+              } else {
+                setTimeout(checkVideo, 5000);
+              }
+            } catch (err) {
+              setError('Failed to fetch video');
+              setIsLoading(false);
+            }
+          };
+          setTimeout(checkVideo, 5000);
+
+          // Get generated images and audio
+          const imagePromptsResponse = await fetch('http://localhost:8000/get-image-prompts', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ story_text: generatedStory })
+          });
+          const imagePromptsData = await imagePromptsResponse.json();
+          setImagePrompts(imagePromptsData.image_prompts);
+
+          const imagesResponse = await fetch('http://localhost:8000/get-images', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ image_prompts: imagePromptsData.image_prompts })
+          });
+          const imagesData = await imagesResponse.json();
+          setImages(imagesData.image_urls);
+
+          const audioResponse = await fetch('http://localhost:8000/get-audio');
+          if (audioResponse.ok) {
+            const audioBlob = await audioResponse.blob();
+            setAudioUrl(URL.createObjectURL(audioBlob));
+          }
+        } catch (err) {
+          setError('Failed to generate video');
+          setIsLoading(false);
+        }
+      };
+
+      const handleImageUpload = (event) => {
+        const files = Array.from(event.target.files);
+        setUploadedImages(files);
+      };
+
+      return (
+        <div className="container mx-auto p-4">
+          <h1 className="text-3xl font-bold mb-4">AI Video Generator</h1>
+          
+          <div className="mb-4">
+            <label className="block text-sm font-medium text-gray-700">Story Prompt</label>
+            <textarea
+              className="mt-1 block w-full rounded-md border-gray-300 shadow-sm"
+              value={storyPrompt}
+              onChange={(e) => setStoryPrompt(e.target.value)}
+              rows={4}
+            />
+            <button
+              className="mt-2 bg-blue-500 text-white px-4 py-2 rounded"
+              onClick={generateStoryPrompt}
+              disabled={isLoading}
+            >
+              {isLoading ? 'Generating...' : 'Generate AI Story Prompt'}
+            </button>
+          </div>
+
+          <div className="mb-4">
+            <label className="block text-sm font-medium text-gray-700">Upload Images</label>
+            <input
+              type="file"
+              multiple
+              accept="image/*"
+              className="mt-1 block w-full"
+              onChange={handleImageUpload}
+            />
+          </div>
+
+          {imagePrompts.length > 0 && (
+            <div className="mb-4">
+              <h2 className="text-xl font-semibold">Generated Image Prompts</h2>
+              <ul className="list-disc pl-5">
+                {imagePrompts.map((prompt, index) => (
+                  <li key={index}>{prompt}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {images.length > 0 && (
+            <div className="mb-4">
+              <h2 className="text-xl font-semibold">Generated Images</h2>
+              <div className="grid grid-cols-3 gap-4">
+                {images.map((url, index) => (
+                  <img key={index} src={url} alt={`Generated ${index}`} className="w-full h-48 object-cover" />
+                ))}
+              </div>
+            </div>
+          )}
+
+          {audioUrl && (
+            <div className="mb-4">
+              <h2 className="text-xl font-semibold">Generated Audio</h2>
+              <audio controls src={audioUrl} className="w-full" />
+            </div>
+          )}
+
+          <button
+            className="bg-green-500 text-white px-4 py-2 rounded"
+            onClick={generateVideo}
+            disabled={isLoading || !storyPrompt}
+          >
+            {isLoading ? 'Generating Video...' : 'Generate Video'}
+          </button>
+
+          {videoUrl && (
+            <div className="mt-4">
+              <h2 className="text-xl font-semibold">Generated Video</h2>
+              <video controls src={videoUrl} className="w-full" />
+            </div>
+          )}
+
+          {error && (
+            <div className="mt-4 text-red-500">
+              Error: {error}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    ReactDOM.render(<App />, document.getElementById('root'));
+  </script>
+</body>
+</html>
